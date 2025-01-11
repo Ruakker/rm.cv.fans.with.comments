@@ -13,12 +13,15 @@ public:
     // z 用于接收. 由 x 推导到 z
     // z: 当前需求比较的装甲板，rotate: super_yaw 到需求装甲的 rotate
     // ekf 之与测量转观测量
+    // 由机器人 x[xyz] 坐标 推导到装甲板 z[ypd, o_yaw]
     template<typename T>
     void operator()(const T x[N_X], T z[N_Z]) const {
         // x[6] 是 super 板的 yaw
+        // 装甲板位置 (xyz)
         const T xyz_armor[3] = { x[0] + ceres::cos(x[6]) * x[8],
                                  x[2] + ceres::sin(x[6]) * x[8],
                                  x[4] };
+        // 装甲板位置 (ypd)
         T ypd[3];
         aimer::math::ceres_xyz_to_ypd(xyz_armor, ypd);
         for (int i = 0; i < 3; i++) {
@@ -32,6 +35,7 @@ private:
 };
 
 // do the same as Measure
+// 返回装甲板的位置 (xyz)
 Eigen::Vector3d state_to_armor_pos(const State& state) {
     return Eigen::Vector3d { state[0] + std::cos(state[6]) * state[8],
                              state[2] + std::sin(state[6]) * state[8],
@@ -39,20 +43,24 @@ Eigen::Vector3d state_to_armor_pos(const State& state) {
 }
 
 // 这个用来计算 ypd_v 的
+// 返回装甲板的速度 (xyz)
 Eigen::Vector3d state_to_armor_v(const State& state) {
-    const Eigen::Vector3d center_v = { state[1], state[3], state[5] };
+    const Eigen::Vector3d center_v = { state[1], state[3], state[5] };  // 中心的 xyz 速度
     const Eigen::Vector2d radius_norm = aimer::math::rotate({ 1.0, 0.0 }, state[6]);
     const Eigen::Vector2d theta_norm = aimer::math::rotate(radius_norm, M_PI / 2.0);
-    const Eigen::Vector2d theta_v = state[7] * theta_norm * state[8];
-    return { center_v[0] + theta_v[0], center_v[1] + theta_v[1], center_v[2] };
+    const Eigen::Vector2d theta_v = state[7] * theta_norm * state[8];  // 这好像是装甲板相对中心线速度？
+    return { center_v[0] + theta_v[0], center_v[1] + theta_v[1], center_v[2] };  // 装甲板的速度 (xyz)
 }
 
 // fn state_to_center_pos => { 写不出来，需要结合 dz }
 // fn state_to_center_v => { state[1, 3, 5] }
+
+// 返回机器人中心的速度 (xyz)
 Eigen::Vector3d state_to_center_v(const State& state) {
     return { state[1], state[3], state[5] };
 }
 
+// 返回相机 z 轴与装甲板法向量的夹角（装甲板法向量 - 相机 z 轴 + \pi）
 double state_to_zn_to_armor(const State& state, const aimer::CoordConverter* const converter) {
     return aimer::math::reduced_angle(state[6] - converter->get_camera_z_i_yaw() + M_PI);
 }
@@ -77,6 +85,7 @@ private:
     double delta_t = 0.;
 };
 
+// 返回经过 dt 时间后机器人的状态
 State state_predict(const State& state, const double& dt) {
     State res;
     res[0] = state[0] + dt * state[1];
@@ -93,17 +102,20 @@ State state_predict(const State& state, const double& dt) {
 
 // [ArmorFilter]
 
+// 返回 t 时刻时机器人的状态
 State ArmorFilter::predict(const double& t) const {
     const double dt = t - this->t;
     const auto state = state_predict(this->state, dt);
     return state;
 }
 
+// 返回 t 时刻时装甲板的位置 (xyz)
 Eigen::Vector3d ArmorFilter::predict_pos(const double& t) const {
     const State state = this->predict(t);
     return lmtd::state_to_armor_pos(state);
 }
 
+// 返回 t 时刻时装甲板的速度 (xyz)
 Eigen::Vector3d ArmorFilter::predict_v(const double& t) const {
     const State state = this->predict(t);
     return lmtd::state_to_armor_v(state);
@@ -111,6 +123,7 @@ Eigen::Vector3d ArmorFilter::predict_v(const double& t) const {
 
 // [end of ArmorFilter]
 
+// 返回根据装甲板观测量和机器人半径 ((y, p, d, o_yaw), r) 得到的初始化机器人状态
 State observation_to_init_state(const Observation& observation, const double& radius) {
     State init_x;
     Eigen::Vector3d armor_xyz = aimer::math::ypd_to_xyz(
@@ -131,6 +144,7 @@ State observation_to_init_state(const Observation& observation, const double& ra
     return init_x;
 }
 
+// 返回 state_vec 中装甲板正对相机角度差小于 max_orientation_angle 的所有 state
 std::vector<State> state_vec_to_direct_state_vec(
     const std::vector<State>& state_vec,
     const double& max_orientation_angle,
@@ -145,12 +159,14 @@ std::vector<State> state_vec_to_direct_state_vec(
     return direct_vec;
 }
 
+// 从 direct_state_vec 中找一个旋转云台对准消耗最小的目标，返回对其瞄准的各参数
 AimAndState choose_direct_aim(
     const std::vector<State>& direct_state_vec,
     const aimer::CoordConverter* const converter
 ) {
     State chosen_state = direct_state_vec[0];
     double min_swing_cost = DBL_MAX;
+    // 找到一个旋转云台打击消耗最小的目标
     for (const auto& direct: direct_state_vec) {
         const Eigen::Vector3d target_pos = state_to_armor_pos(direct);
         const auto aim_ypd = converter->target_pos_to_aim_ypd(target_pos);
@@ -171,6 +187,7 @@ AimAndState choose_direct_aim(
 }
 
 // 只可以在角速度较大的时候调用哦
+// 是不是说有时候装甲板转得太快，只能选择下一块现在还没出现的装甲板进行预判位置然后击打？
 AimAndState choose_indirect_aim(
     const std::vector<State>& indirect_state_vec,
     const double& max_orientation_angle,
@@ -178,7 +195,7 @@ AimAndState choose_indirect_aim(
     aimer::CoordConverter* const converter,
     aimer::EnemyState* const enemy_state
 ) {
-    const double w = indirect_state_vec[0][7];
+    const double w = indirect_state_vec[0][7];  // 第一个机器人装甲板角速度
     // "wait" is the angle where you should wait for the next armor to come (emerge)
     const double zn_to_wait = w > 0.0 ? -max_orientation_angle : +max_orientation_angle;
     double min_armor_to_wait = DBL_MAX;
@@ -220,6 +237,7 @@ AimAndState choose_indirect_aim(
     return AimAndState { aim, indirect_aim_state };
 }
 
+// 在 state_vec 中选择一个目标，返回对其的瞄准参数（如果没有合适的就等待）
 AimAndState state_vec_to_aim(
     const std::vector<State>& state_vec,
     const double& max_orientation_angle,
@@ -251,11 +269,13 @@ AimAndState state_vec_to_aim(
 // 像 SimpleTopModel 那样再维护一个状态似乎不太可靠
 // - 选择角度较小的：角度太大的 pnp dis 不准
 // - 选择左边的：防止两个装甲板之间反复横跳
+
+// 初始化 TopModel 中的一系列参数
 void TopModel::init(aimer::CoordConverter* const converter, aimer::EnemyState* const enemy_state) {
     this->predict_t = converter->get_img_t();
     this->update_t = converter->get_img_t();
     const auto observation_and_r_and_id =
-        this->get_observation_and_r_and_id(converter, enemy_state);
+        this->get_observation_and_r_and_id(converter, enemy_state);  // observation: 观测到的装甲板参数
     const auto init_x = observation_to_init_state(
         std::get<0>(observation_and_r_and_id),
         enemy_state->get_default_radius()
@@ -335,14 +355,14 @@ void TopModel::update(
                 most_like_index = i;
                 most_like_orientation_yaw_diff = yaw_diff;
             }
-        }
+        }  // 找出当前看到的装甲板最有可能是机器人的哪一块
 
-        if (most_like_index != 0) {
+        if (most_like_index != 0) {  // 如果不是上一次识别到的装甲板（设上次的装甲板是 0 号）
             auto fixed_state = predicted_state;
             // 四个装甲板车有两种半径
             if (armors_num == 4 && most_like_index % 2 == 1) {
                 // 出现了跳转捏
-                std::swap(fixed_state[8], this->another_radius);
+                std::swap(fixed_state[8], this->another_radius);  // 装甲板是奇数号了，换另外一个半径
                 // after(fixed_z + dz) == before(tracked_z + fixed_z - tracked_z)
                 // == before(fixed_z)
                 this->dz = fixed_state[4] - tracked_xyz[2];
@@ -350,12 +370,12 @@ void TopModel::update(
                 const double dz_abs_max =
                     ::base::get_param<double>("auto-aim.lmtd-top-model.fix.dz.abs-max");
                 this->dz = std::clamp(this->dz, -dz_abs_max, +dz_abs_max);
-                fixed_state[4] = tracked_xyz[2];
+                fixed_state[4] = tracked_xyz[2];  // 装甲板是奇数号了，修复一下高度
                 base::println("reset z {:.3f}", fixed_state[4]);
             }
             // 滤波器内速度太慢时无法得出任何靠谱的装甲板角度，以下写法爆炸了
             // fixed_state[6] = possible_orientation_yaw[most_like_index];
-            fixed_state[6] = tracked_observation[3];
+            fixed_state[6] = tracked_observation[3];  // 换新的装甲板朝向角
             this->ekf.set_x(fixed_state);
         }
     }
@@ -453,11 +473,13 @@ void TopModel::update(
     }
 }
 
+// 根据当前时间与上次更新时间差判断结果是否可靠
 bool TopModel::credit(aimer::CoordConverter* const converter) const {
     const double credit_dt = ::base::get_param<double>("auto-aim.lmtd-top-model.credit-dt");
     return converter->get_img_t() - this->update_t <= credit_dt;
 }
 
+// 返回目标的所有装甲板在 t 时刻的预测状态
 std::vector<PredictedArmor> TopModel::predict_armors(
     const double& t,
     aimer::CoordConverter* const converter,
@@ -489,6 +511,7 @@ std::vector<PredictedArmor> TopModel::predict_armors(
     return armors;
 }
 
+// 在 img 上画 t 时刻目标所有装甲板的预测状态
 void TopModel::draw_armors(
     cv::Mat& img,
     const double& t,
@@ -517,6 +540,7 @@ int TopModel::get_top_level() const {
     return this->top_level;
 }
 
+// 返回当前时刻 (?) 下目标的所有装甲板状态
 std::vector<ArmorFilter> TopModel::get_armor_filters(aimer::EnemyState* const enemy_state) const {
     const int armors_num = enemy_state->get_armors_num();
     // 直接获取目前的状态做滤波器就行
@@ -550,6 +574,8 @@ std::vector<ArmorFilter> TopModel::get_armor_filters(aimer::EnemyState* const en
     return filters;
 }
 
+// 以下称不考虑开火延迟，预测的那块装甲板为 water
+// 称考虑开火延迟的为 command
 aimer::AimInfo TopModel::get_aim(
     aimer::CoordConverter* const converter,
     aimer::EnemyState* const enemy_state
@@ -647,7 +673,11 @@ aimer::AimInfo TopModel::get_aim(
                 // 注意这里线性函数的参数是角度制哦
                 return a * aimer::math::rad_to_deg(angle) + b;
             };
+
+            // water 装甲板角速度
             const double w_water_gun_hit = water_gun_hit_aim_and_state.state[7];
+
+            // command 装甲板与 water 装甲板法向量角度之差
             const double armor_rotate_water_gun_hit_to_command_hit = aimer::math::reduced_angle(
                 command_hit_aim_and_state.state[6] - water_gun_hit_aim_and_state.state[6]
             );
@@ -659,16 +689,31 @@ aimer::AimInfo TopModel::get_aim(
             //     aimer::math::rad_to_deg(armor_rotate_water_gun_hit_to_command_hit)
             // );
 
+            // 以下简称“击打范围”为 (-max_orientation_angle, +max_orientation_angle)
+            // 如果 water 和 command 预测的不是同一块装甲板 (?)
+            // 个人思考：如果不切换装甲板的话，command 装甲板的位置肯定在 water 装甲板后面（因为加了开火延迟，提前量要更大）
+            // 但是如果出现了 command 装甲板位置在 water 之前，那么可能是 water 装甲板已经转出击打范围了，command 对应的是下一块装甲板。
+            // 这个 if 判断的就是这种情况
+            // 那么此时再去瞄 water 装甲板是没有意义的（等到第一发打中，那块装甲板肯定已经转出去了），所以这里就要考虑等下一块装甲板转进来然后打它
             if (std::signbit(w_water_gun_hit)
                 != std::signbit(armor_rotate_water_gun_hit_to_command_hit))
             {
                 // 小心，这里没有预防 water_gun_hit 装甲板超过 max_orientation_angle 的情况
+                // (?) 上面是原作者注释，不太懂
+
+                // 相机 z 轴与 water 装甲板法向量角度之差
                 const double zn_to_armor_water_gun_hit =
                     state_to_zn_to_armor(water_gun_hit_aim_and_state.state, converter);
                 // const double zn_to_armor_command_hit =
                 //     state_to_zn_to_armor(command_hit_aim_and_state.state, converter);
+
+                // 如果装甲板在正转，water 就会转到 +max_orientation_angle 离开击打范围
+                // 如果装甲板在负转，water 就会转到 -max_orientation_angle 离开击打范围
+                // 这里的对应关系比较迷惑，要画图理解
                 const double zn_to_where_you_should_rotate_back =
                     w_water_gun_hit > 0.0 ? +max_orientation_angle : -max_orientation_angle;
+
+                // 装甲板 water 离离开击打范围还差多少角度
                 const double armor_water_gun_hit_to_rotate_back = aimer::math::reduced_angle(
                     zn_to_where_you_should_rotate_back - zn_to_armor_water_gun_hit
                 );
@@ -677,22 +722,36 @@ aimer::AimInfo TopModel::get_aim(
                 // );
 
                 // 这里的 time 是正常原点的时间
+
+                // 装甲板转到 water 的时刻
                 const double time_water_gun_hit = converter->get_prediction_time(
                     state_to_armor_pos(water_gun_hit_aim_and_state.state)
                 );
+
+                // 装甲板转到 hit 的时刻
                 const double time_command_hit =
                     converter->get_hit_time(state_to_armor_pos(command_hit_aim_and_state.state));
+                
+                // water 离开击打范围的时刻
                 const double time_start_rotating_back =
                     time_water_gun_hit + armor_water_gun_hit_to_rotate_back / w_water_gun_hit;
                 const auto filter =
                     ArmorFilter { water_gun_hit_aim_and_state.state, time_water_gun_hit };
+
+                // water 离开击打范围时的位置
                 const auto pos_when_start_rotating_back =
                     filter.predict_pos(time_start_rotating_back);
+
+                // water 离开击打范围时对它的瞄准参数
                 const auto aim_when_start_rotating_back =
                     converter->target_pos_to_aim_ypd(pos_when_start_rotating_back);
+                
+                // 打 water 的最后一刻时枪管与打 command 时枪管的夹角
                 const double yaw_barrel_rotate_back = aimer::math::reduced_angle(
                     command_hit_aim_and_state.aim.ypd.yaw - aim_when_start_rotating_back.yaw
                 );
+
+                // 枪管从打 water 最后一刻时的位置到转过去打 command 所需要的时间
                 const double time_end_rotating_back = time_start_rotating_back
                     + angle_to_rotate_time(std::abs(yaw_barrel_rotate_back));
                 // base::print_info(
@@ -709,6 +768,8 @@ aimer::AimInfo TopModel::get_aim(
                 //     time_end_rotating_back,
                 //     time_command_hit
                 // );
+
+                // 如果枪管还没转到打 command 的角度就不要打（即使预判命中时 command 已经转到可以打的位置了）
                 if (time_start_rotating_back < time_command_hit
                     && time_command_hit < time_end_rotating_back)
                 {
@@ -730,6 +791,8 @@ aimer::AimInfo TopModel::get_aim(
         }
         return true; // send shoot command
     }();
+
+    // 按照 water 的参数打
     auto aim_with_shoot_command = water_gun_hit_aim_and_state.aim;
     aim_with_shoot_command.shoot =
         you_had_better_shoot_at_this_command ? ::ShootMode::SHOOT_NOW : ::ShootMode::TRACKING;
