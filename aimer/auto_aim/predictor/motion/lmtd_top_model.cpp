@@ -187,7 +187,7 @@ AimAndState choose_direct_aim(
 }
 
 // 只可以在角速度较大的时候调用哦
-// 是不是说有时候装甲板转得太快，只能选择下一块现在还没出现的装甲板进行预判位置然后击打？
+// 现在没有合适的装甲板在击打范围里，所以在所有识别到的机器人中选出下一块装甲板转过来正对相机所需角度最小的机器人进行击打，返回的是对进入击打范围那一刻的装甲板瞄准参数
 AimAndState choose_indirect_aim(
     const std::vector<State>& indirect_state_vec,
     const double& max_orientation_angle,
@@ -215,7 +215,7 @@ AimAndState choose_indirect_aim(
             min_armor_to_wait = armor_to_wait;
             indirect_aim_state = state;
         }
-    }
+    }  // 找即将进入击打范围的装甲板
     // 把他转换成 aim
     // 这里 t 传入 0.0
     const auto armor_filter = ArmorFilter { indirect_aim_state, 0.0 };
@@ -616,6 +616,8 @@ aimer::AimInfo TopModel::get_aim(
         fmt::format("auto-aim.lmtd-top-model.aim.top{}.max-out-error", this->top_level)
     );
     const bool allow_indirect = this->top_level > 0;
+
+    // 选出 water
     const auto water_gun_hit_aim_and_state = state_vec_to_aim(
         water_gun_hit_state_vec,
         max_orientation_angle,
@@ -633,6 +635,8 @@ aimer::AimInfo TopModel::get_aim(
         const State that_state = filter.predict(command_hit_time);
         command_hit_state_vec.emplace_back(that_state);
     }
+
+    // 选出 command
     const auto command_hit_aim_and_state = state_vec_to_aim(
         command_hit_state_vec,
         max_orientation_angle,
