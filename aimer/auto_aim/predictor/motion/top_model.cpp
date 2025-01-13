@@ -16,10 +16,11 @@ const int FIND_ANGLE_ITERATIONS = 12; // 三分法迭代次数 理想精度 < 1.
 const double SIMPLE_TOP_TRACK_AREA_RATIO = 2.;
 const double DETECTOR_ERROR_PIXEL_BY_SLOPE = 2.;
 
+// 计算投影装甲板和实际装甲板的误差
 double get_pts_cost(
-    const std::vector<cv::point2f>& cv_refs,
-    const std::vector<cv::point2f>& cv_pts,
-    const double& inclined
+    const std::vector<cv::point2f>& cv_refs,  // 投影装甲板
+    const std::vector<cv::point2f>& cv_pts,   // 实际装甲板
+    const double& inclined                    // 夹角
 ) {
     std::size_t size = cv_refs.size();
     std::vector<eigen::vector2d> refs;
@@ -50,29 +51,42 @@ double get_pts_cost(
     return cost;
 }
 
+// 获取装甲板角点在世界坐标系下的坐标 xyz
 std::vector<Eigen::Vector3d> radial_armor_corners(
-    const Eigen::Vector3d& pos,
-    const aimer::ArmorType& type,
-    const double& pitch,
-    const double& z_to_v,
+    const Eigen::Vector3d& pos,    // 装甲板中心坐标
+    const aimer::ArmorType& type,  // 装甲板类型
+    const double& pitch,           // 装甲板俯仰角
+    const double& z_to_v,          // 在地面投影下相机 z 轴与装甲板法向量夹角
     aimer::CoordConverter* const converter
 ) {
     const std::vector<cv::Point3d>& pw =
         type == aimer::ArmorType::BIG ? aimer::PW_BIG : aimer::PW_SMALL;
+
+    // 装甲板径向朝向的方向向量（法向量在地面的投影)
     Eigen::Vector2d radius_norm = aimer::math::rotate(converter->get_camera_z_i2(), z_to_v);
     Eigen::Vector3d x_norm;
+
+    // 因为装甲板没有 roll
+    // 所以径向方向向量逆时针转 90 度是其 x 轴
+    //（假设装甲板中心为原点，z 轴向前（外），x 轴向左，y 轴向上）
+    // 即此为装甲板 x 轴方向向量
     x_norm << aimer::math::rotate(radius_norm, M_PI / 2.), 0.;
     Eigen::Vector3d w_z_norm { 0., 0., 1. }; // 不要把变量写的像函数
     Eigen::Vector3d y_norm;
+
+    // 装甲板 y 轴方向向量
     y_norm << -radius_norm * std::sin(pitch), 0.;
     y_norm += w_z_norm * std::cos(pitch);
     std::vector<Eigen::Vector3d> corners;
+
+    // 计算装甲板角点在世界坐标系下的坐标
     for (int i = 0; i < 4; ++i) {
         corners.push_back(pos + x_norm * pw[i].x + y_norm * pw[i].y);
     }
     return corners;
 }
 
+// 获取装甲板角点在图像上的坐标 xy
 std::vector<cv::Point2f> radial_armor_pts(
     const Eigen::Vector3d& pos,
     const aimer::ArmorType& type,
@@ -89,6 +103,7 @@ std::vector<cv::Point2f> radial_armor_pts(
     return pts;
 }
 
+// 返回两块装甲板在图像上的坐标
 std::vector<std::vector<cv::Point2f>> radial_double_pts(
     const std::vector<aimer::ArmorData>& armors,
     const double& z_to_l,
@@ -112,6 +127,7 @@ std::vector<std::vector<cv::Point2f>> radial_double_pts(
     return res;
 }
 
+// 计算角度为 x 时的误差
 double SingleCost::operator()(const double& x) {
     // value: z_to_l
     std::vector<cv::Point2f> pts = top::radial_armor_pts(
@@ -159,6 +175,7 @@ double DoubleCost::operator()(const double& x) {
         );
 }
 
+// 三分法解装甲板朝向角
 double fit_single_z_to_v(
     const aimer::ArmorData& armor,
     const double& z_to_v_exp,
@@ -168,6 +185,8 @@ double fit_single_z_to_v(
 ) {
     top::SingleCost single_cost = top::SingleCost(top::SingleData(armor, z_to_v_exp, converter));
     aimer::math::Trisection solver;
+
+    // 三分
     std::pair<double, double> res =
         solver.find(z_to_v_min, z_to_v_max, single_cost, top::FIND_ANGLE_ITERATIONS);
     return aimer::math::reduced_angle(res.first);
@@ -205,6 +224,7 @@ double fit_double_z_to_l(
 // 1. 不知道旧的风格会不会被重新启用，主要看可读性
 // 2. 提供旧风格与新风格的比较
 
+// 返回最终瞄准状态
 aimer::AimInfo get_top_limit_aim(
     const top::CenterFilter& center_filter,
     const std::vector<top::TopArmor>& prediction_results,
@@ -219,10 +239,13 @@ aimer::AimInfo get_top_limit_aim(
         aimer::AimInfo emerging_aim;
         top::TopArmor armor;
     };
+
+    // 陀螺旋转方向
     auto get_direction = [](const double& top_w) -> top::TopDirection {
         return top_w > 0. ? top::TopDirection::CCW : top::TopDirection::CW;
     };
 
+    // 筛选角度在击打范围内的装甲板
     auto get_directs = [](const std::vector<top::TopArmor>& results) -> std::vector<top::TopArmor> {
         std::vector<top::TopArmor> directs;
         for (const auto& res: results) {
@@ -236,6 +259,7 @@ aimer::AimInfo get_top_limit_aim(
         return directs;
     };
 
+    // 返回瞄准参数（包括瞄准方向和瞄准旋转速度等）
     auto choose_direct_aim = [&converter, &center_filter, &top_w, &get_direction](
                                  const std::vector<top::TopArmor>& directs
                              ) -> AimArmor {
@@ -247,7 +271,7 @@ aimer::AimInfo get_top_limit_aim(
             {
                 direct = d;
             }
-        }
+        }  // 找转动花费最小的装甲板 direct
         aimer::AimInfo aim = [&]() {
             // 此处求解空气阻力函数复用
             aimer::ShootParam shoot_param = converter->target_pos_to_shoot_param(direct.pos);
@@ -259,7 +283,7 @@ aimer::AimInfo get_top_limit_aim(
             Eigen::Vector2d zn_norm2 = aimer::math::rotate(converter->get_camera_z_i2(), M_PI);
             // v_norm 是装甲板向量
             Eigen::Vector2d v_norm2 = aimer::math::rotate(zn_norm2, direct.zn_to_v);
-            // xy 方向上的速度
+            // 装甲板 xy 方向上的速度
             Eigen::Vector2d xy_v =
                 aimer::math::rotate(
                     v_norm2,
@@ -276,6 +300,7 @@ aimer::AimInfo get_top_limit_aim(
     };
 
     // results 应该包含时间
+    // 返回即将出现在击打范围内的装甲板的瞄准参数
     auto get_indirect_aim = [&converter, &state, &center_filter, &top_w, &get_direction](
                                 const std::vector<top::TopArmor>& results
                             ) -> AimArmor {
@@ -310,7 +335,7 @@ aimer::AimInfo get_top_limit_aim(
                 indirect = armor; // indirect
                 closest_to_lim = armor_to_lim; // 允许负值出现，但是并不会跟踪
             }
-        }
+        }  // 找离进入击打范围最近的板子
         // 匀速时理想 lim_center 固定
         // lim 度（例如 0）时的中心（欲瞄准
         // 用这个中心延长的位置）
@@ -323,6 +348,8 @@ aimer::AimInfo get_top_limit_aim(
         Eigen::Vector2d center_lim2 = { center_lim(0, 0), center_lim(1, 0) };
         Eigen::Vector2d lim_norm2 =
             aimer::math::rotate(converter->get_camera_z_i2(), M_PI + zn_to_lim);
+
+        // 装甲板出现在击打范围内时的位置
         Eigen::Vector2d emerging_pos2 = center_lim2 + lim_norm2 * indirect.length;
         Eigen::Vector3d emerging_pos = { emerging_pos2(0, 0),
                                          emerging_pos2(1, 0),
@@ -338,6 +365,7 @@ aimer::AimInfo get_top_limit_aim(
         return AimArmor { aim, indirect }; // 是根据 lim 延伸出来的
     };
 
+    // 如果有在击打范围内的板子，就直接打；如果没有，就等一块板子进入击打范围打，返回瞄准参数
     auto get_aim_angle = [&get_directs, &choose_direct_aim, &get_indirect_aim](
                              const std::vector<top::TopArmor>& results
                          ) -> AimArmor {
@@ -484,6 +512,7 @@ void top_draw_aim(
     }
 }
 
+// 由装甲板计算机器人中心
 Eigen::Vector3d prolonged_center(
     const Eigen::Vector3d& armor_pos,
     const double& radius,
